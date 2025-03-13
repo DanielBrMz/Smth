@@ -1,0 +1,22 @@
+version: '3'
+
+services:
+  cms:
+    image: 961086480768.dkr.ecr.us-east-1.amazonaws.com/cms:dev-1.1
+    environment:
+      - PAYLOAD_PUBLIC_SERVER_URL=https://devcms.sidepocket.com
+      - NEXT_PUBLIC_SERVER_URL=https://devcms.sidepocket.com
+      - EMAIL_FROM_ADDRESS=support@sidepocket.com
+      - COGNITO_REGION=us-east-1
+      - CLOUDFLARE_ACCOUNT_ID=402825a7bfd8d138d3810ef4f8ec41f5
+      - R2_REGION=us-east-1
+      - R2_BUCKET=dev-cms-video-media
+      - R2_ENDPOINT=https://402825a7bfd8d138d3810ef4f8ec41f5.r2.cloudflarestorage.com/dev-cms-video-media
+    ports:
+      - "3000:3000"
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: sidepocket-dev
+        awslogs-region: us-east-1
+        awslogs-stream-prefix: cms

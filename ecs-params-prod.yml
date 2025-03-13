@@ -1,0 +1,46 @@
+version: 1
+task_definition:
+  task_execution_role: ecsTaskExecutionRole
+  task_role_arn: ecsTaskCognitoAccessRole
+  ecs_network_mode: awsvpc
+  task_size:
+    mem_limit: 3GB
+    cpu_limit: 512
+  services:
+    cms:
+      mem_limit: 3GB
+      cpu_shares: 512
+      secrets:
+        - value_from: CMS_POSTGRES_USER
+          name: POSTGRES_USER
+        - value_from: CMS_POSTGRES_PASSWORD
+          name: POSTGRES_PASSWORD
+        - value_from: CMS_POSTGRES_DB
+          name: POSTGRES_DB
+        - value_from: UAT_POSTGRES_HOST
+          name: POSTGRES_HOSTNAME
+        - value_from: POSTGRES_PORT
+          name: POSTGRES_PORT
+        - value_from: PAYLOAD_SECRET
+          name: PAYLOAD_SECRET
+        - value_from: SENDGRID_API_KEY
+          name: SENDGRID_API_KEY
+        - value_from: CMS_COGNITO_CLIENT_ID
+          name: COGNITO_CLIENT_ID
+        - value_from: CMS_COGNITO_USER_POOL_ID
+          name: COGNITO_USER_POOL_ID
+        - value_from: CMS_COGNITO_CLIENT_SECRET
+          name: COGNITO_CLIENT_SECRET
+        - value_from: CMS_R2_ACCESS_KEY_ID
+          name: R2_ACCESS_KEY_ID
+        - value_from: CMS_R2_SECRET_ACCESS_KEY
+          name: R2_SECRET_ACCESS_KEY
+run_params:
+  network_configuration:
+    awsvpc_configuration:
+      subnets:
+        - "subnet-bb67aedd"
+        - "subnet-f59589cb"
+      security_groups:
+        - "sg-0b58e57f96c14201a" # CMS-Prod
+      assign_public_ip: ENABLED

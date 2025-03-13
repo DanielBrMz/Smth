@@ -1,0 +1,233 @@
+name: build-deploy-container
+on:
+  release:
+    types:
+      - created
+
+env:
+  # Global variables
+  SLACK_CHANNEL_ID: C04CRHZ3D7D
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: endorser-cms
+  PROFILE_NAME: sp_actions
+  APP_NAME: cms
+  APP_PORT: 3000
+  WORKING_DIR: sp-endorser-cms
+  # Branch specific environment varilables are defined in the build-deploy section below
+
+jobs:
+  build-deploy:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      # Branch Specific Environment Variables
+      - name: Branch-specific environment variables Prod
+        if: ${{ contains(github.ref, 'prod-') && (contains(github.actor, 'travis-infosec')  || contains(github.actor, 'tomaszpp') || contains(github.actor, 'SamCabV') || contains(github.actor, 'shridude') || contains(github.actor, 'maxwellrbradley') || contains(github.actor, 'pernu')) && contains(github.event_name, 'release') }}
+        run: |
+          echo "DEPLOY_ENVIRONMENT=prod" >> $GITHUB_ENV
+          echo "CLUSTER_NAME=sp-fargate-1" >> $GITHUB_ENV
+          echo "ELB_URL=https://cms.sidepocket.com" >> $GITHUB_ENV
+          echo "TARGET_GROUP='arn:aws:elasticloadbalancing:us-east-1:961086480768:targetgroup/cms/d8ecb45b50992050'" >> $GITHUB_ENV
+          echo "ECSPARAMS=ecs-params-prod.yml" >> $GITHUB_ENV
+          echo "OK2DEPLOY=true" >> $GITHUB_ENV
+
+      - name: Branch-specific environment variables Dev
+        if: ${{ contains(github.ref, 'dev-') && (contains(github.actor, 'tomaszpp') || contains(github.actor, 'travis-infosec') || contains(github.actor, 'SamCabV') || contains(github.actor, 'shridude') || contains(github.actor, 'maxwellrbradley') || contains(github.actor, 'pernu')) && contains(github.event_name, 'release')}}
+        run: |
+          echo "DEPLOY_ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "CLUSTER_NAME=sp-fargate-dev" >> $GITHUB_ENV
+          echo "ELB_URL=https://devcms.sidepocket.com" >> $GITHUB_ENV
+          echo "TARGET_GROUP='arn:aws:elasticloadbalancing:us-east-1:961086480768:targetgroup/cms-dev/b8ff118def1852c8'" >> $GITHUB_ENV
+          echo "ECSPARAMS=ecs-params-dev.yml" >> $GITHUB_ENV
+          echo "OK2DEPLOY=true" >> $GITHUB_ENV
+
+      # check if variables are set
+      - name: Check if OK2DEPLOY is set to true
+        run: |
+          if [ "${{ env.OK2DEPLOY }}" == 'true' ] ; then
+            echo "Deploying to Env: ${{ env.DEPLOY_ENVIRONMENT }}"
+          else
+            echo "Environment Variables not set. Please check the github.actor. Also your release tag must start with prod-, dev- or qa-"
+            exit 1
+          fi
+
+      # github actions doesn't allow using env variables set up in the same step
+      - name: Set the Environment variables
+        run: |
+          echo "DOCKER_COMPOSE_FILENAME=docker-compose-ecs-${{ env.DEPLOY_ENVIRONMENT }}.yml" >> $GITHUB_ENV
+          echo "PROJECT_NAME=${{ env.APP_NAME }}-${{ env.DEPLOY_ENVIRONMENT }}" >> $GITHUB_ENV
+
+      # Create a short github sha that consists of the first 7 characters of the commit
+      - name: Add SHORT_SHA env property with commit short sha
+        run: echo "SHORT_SHA=`echo ${GITHUB_SHA} | cut -c1-7`" >> $GITHUB_ENV
+
+      # Set the image tag based on github event
+      - name: Set the Image Tag to action-(branch)-(short github sha) if not release or pull request
+        run: |
+          echo "IMAGE_TAG=actions-${GITHUB_REF##*/}-${{ env.SHORT_SHA }}" >> $GITHUB_ENV
+        if: github.event_name != 'release' && github.event.action != 'created' && github.event_name != 'pull_request'
+
+      - name: Set the Image Tag to action-(branch)-PR(pull request number)-(short github sha) if this is a pull request
+        run: |
+          echo "IMAGE_TAG=actions-${{ github.head_ref }}-PR${{ github.event.number }}-${{ env.SHORT_SHA }}" >> $GITHUB_ENV
+        if: github.event_name == 'pull_request' && github.event_name != 'release' && github.event.action != 'created'
+
+      - name: Set the Image Tag to commit Tag if this is a tagged release in github
+        run: |
+          echo "IMAGE_TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+        if: github.event_name == 'release' && github.event.action == 'created'
+
+      # Send the in progress status notification to slack
+      - name: Initial Slack Notification
+        id: slack
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: ${{ env.SLACK_CHANNEL_ID }}
+          payload: |
+            {
+              "text": "${{ env.APP_NAME }} ${{ env.DEPLOY_ENVIRONMENT }} build/deployment started (In Progress)",
+              "attachments": [
+                {
+                  "pretext": "${{ env.APP_NAME }} deployment started for ${{ env.DEPLOY_ENVIRONMENT }} release: ${{ env.IMAGE_TAG }} to ${{ env.CLUSTER_NAME }} cluster.",
+                  "color": "dbab09",
+                  "fields": [
+                    {
+                      "title": "Status",
+                      "short": true,
+                      "value": "In Progress"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN}}
+
+      # Check out required repos.
+      - name: Checkout main app
+        uses: actions/checkout@v3
+        with:
+          path: ${{ env.WORKING_DIR }}
+
+      # AWS Configuration
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # Create a service build and push to ECR
+      - name: Build, tag and push service image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          cd ${{ env.WORKING_DIR }}
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG }} .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG }}
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG }}"
+
+      # Install ecs-cli
+      # https://github.com/aws/amazon-ecs-cli
+      # This project may have been abandoned in favor of AWS Copilot CLI.
+      - name: Install ecs-cli
+        run: |
+          wget https://amazon-ecs-cli.s3.amazonaws.com/ecs-cli-linux-amd64-latest
+          sudo mv ecs-cli-linux-amd64-latest /usr/bin/ecs-cli
+          chmod 755 /usr/bin/ecs-cli
+
+      # Create cluster configuration
+      - name: ecs-cli configure cluster
+        run: |
+          ecs-cli configure --cluster ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --config-name ${{ env.CLUSTER_NAME }}
+
+      # Create the authentication config file
+      - name: ecs-cli configure authentication
+        run: |
+          ecs-cli configure profile --profile-name ${{ env.PROFILE_NAME }} --access-key ${{ secrets.AWS_ACCESS_KEY_ID }} \
+            --secret-key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # Update the docker compose file with the image tag for the service
+      - name: Update docker-compose.yml image tag for service
+        uses: fjogeleit/yaml-update-action@main
+        with:
+          valueFile: ${{ env.WORKING_DIR }}/${{ env.DOCKER_COMPOSE_FILENAME }}
+          propertyPath: 'services.${{ env.APP_NAME }}.image'
+          value: ${{ steps.build-image.outputs.image }}
+          #value: '961086480768.dkr.ecr.us-east-1.amazonaws.com/endorser-cms:actions-devops-241-build-cms-1789607'
+          commitChange: false
+
+      # Deploy the service container from ECR and update the target groups
+      - name: Deploy Container to ECS
+        run: |
+          cd ${{ env.WORKING_DIR }}; \
+          echo ${{ env.ECSPARAMS }}; \
+          cat ${{ env.ECSPARAMS }}; \
+          ecs-cli compose --file ${{ env.DOCKER_COMPOSE_FILENAME }} --project-name ${{ env.PROJECT_NAME }} --ecs-params ${{ env.ECSPARAMS }} service up \
+            --create-log-groups \
+            --force-deployment \
+            --launch-type FARGATE \
+            --cluster-config ${{ env.CLUSTER_NAME }} \
+            --ecs-profile ${{ env.PROFILE_NAME }} \
+            --target-group-arn ${{ env.TARGET_GROUP }} \
+            --container-name ${{ env.APP_NAME }} \
+            --container-port ${{ env.APP_PORT }}
+
+      # Notify Slack about successful Deployment
+      - name: Success Slack Notification
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          update-ts: ${{ steps.slack.outputs.ts }}
+          channel-id: ${{ env.SLACK_CHANNEL_ID }}
+          payload: |
+            {
+              "text": "${{ env.APP_NAME }} ${{ env.DEPLOY_ENVIRONMENT }} build/deployment completed.",
+              "attachments": [
+                {
+                  "pretext": "${{ env.APP_NAME }} deployment completed for ${{ env.DEPLOY_ENVIRONMENT }} release: ${{ env.IMAGE_TAG }} to ${{ env.CLUSTER_NAME }} cluster.",
+                  "color": "28a745",
+                  "fields": [
+                    {
+                      "title": "Status",
+                      "short": true,
+                      "value": "Completed"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN}}
+        if: ${{ success() }}
+
+      # Notify Slack about Failed Deployment
+      - name: Failure Slack Notification
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          update-ts: ${{ steps.slack.outputs.ts }}
+          channel-id: ${{ env.SLACK_CHANNEL_ID }}
+          payload: |
+            {
+              "text": "${{ env.APP_NAME }} ${{ env.DEPLOY_ENVIRONMENT }} build/deployment Failed.",
+              "attachments": [
+                {
+                  "pretext": "${{ env.APP_NAME }} deployment failed for ${{ env.DEPLOY_ENVIRONMENT }} release: ${{ env.IMAGE_TAG }} to ${{ env.CLUSTER_NAME }} cluster.",
+                  "color": "d11904",
+                  "fields": [
+                    {
+                      "title": "Status",
+                      "short": true,
+                      "value": "Failed"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN}}
+        if: ${{ failure() }}
